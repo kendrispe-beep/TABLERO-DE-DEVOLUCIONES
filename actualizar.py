@@ -20,6 +20,11 @@ SQL = Path(__file__).resolve().parent
 IT = 250000
 
 SQLS = {
+    "sql_com.sql": r"""SELECT nro, ANY_VALUE(LEFT(com,400)) com FROM (
+ SELECT f.NRO_RECLAMO nro, IFF(s.NRO_CASO IS NULL, f.COMENTARIO_DEVOLUCION, s.COMENTARIO_DEVOLUCION) com FROM JM_SILVER_PRD_DB.JM_PQRS.FACT_RECLAMO f LEFT JOIN JM_SILVER_PRD_DB.JM_PQRS.STG_SF_CASE_RECLAMO s ON s.NRO_CASO=f.NRO_RECLAMO
+ UNION ALL SELECT f.NRO_PETICION, IFF(s.NRO_CASO IS NULL, f.COMENTARIO_DEVOLUCION, s.COMENTARIO_DEVOLUCION) FROM JM_SILVER_PRD_DB.JM_PQRS.FACT_PETICION f LEFT JOIN JM_SILVER_PRD_DB.JM_PQRS.STG_SF_CASE_PETICION s ON s.NRO_CASO=f.NRO_PETICION
+ UNION ALL SELECT f.NRO_QUEJA, IFF(s.NRO_CASO IS NULL, f.COMENTARIO_DEVOLUCION, s.COMENTARIO_DEVOLUCION) FROM JM_SILVER_PRD_DB.JM_PQRS.FACT_QUEJA f LEFT JOIN JM_SILVER_PRD_DB.JM_PQRS.STG_SF_CASE_QUEJA s ON s.NRO_CASO=f.NRO_QUEJA)
+WHERE nro IS NOT NULL GROUP BY nro""",
     "sql_curva.sql": r"""SELECT TO_CHAR(DATE_FROM_PARTS(t.ANO,t.MES,t.NUM_DIA_MES),'YYYY-MM-DD') fecha, ROUND(SUM(IFF(f.VALOR_VENTA_OFERTA>0,f.VALOR_VENTA_OFERTA,0))) bruta, SUM(IFF(f.VALOR_VENTA_OFERTA<0,1,0)) lineas_dev FROM JM_SILVER_PRD_DB.JM_VENTAS_LEGACY.FACT_FACTURACION f JOIN JM_SILVER_PRD_DB.JM_CORE_LEGACY.DIM_UNIDAD_TIEMPO t ON f.UNIDAD_TIEMPO_ID=t.ID WHERE t.ANO=%(ano)s AND t.MES=%(mes)s GROUP BY 1 ORDER BY 1""",
     "sql_nc.sql": r"""WITH hist AS (
  SELECT NRO_RECLAMO nro, 'RECLAMO' tipo_pqr, FECHA_HORA_CAMBIO fh FROM JM_SILVER_PRD_DB.JM_PQRS.FACT_RECLAMO_HISTORIAL WHERE CAMPO_MODIFICADO='Tipo_de_Devolucion__c' AND FECHA_CAMBIO >= '2026-01-01'
@@ -182,6 +187,12 @@ def main():
                 print(f"Aviso: no se pudo consultar la curva de ventas de {mes_ant} ({e}); se conserva la anterior.")
         else:
             print(f"Curva de ventas {mes_ant} ya cargada; no se vuelve a consultar.")
+        # Comentario Devolución vigente de todos los casos: si SAC lo corrige en Salesforce después, el motivo se actualiza
+        coms = None
+        try:
+            coms = {str(n): (c or "") for n, c in consultar(cx, "sql_com.sql")}
+        except Exception as e:
+            print(f"Aviso: no se pudieron refrescar los comentarios ({e}); se conservan los anteriores.")
     finally:
         cx.close()
 
@@ -192,6 +203,13 @@ def main():
     ids = {r[0] for r in nc_new}
     nc["rows"] = [r for r in nc["rows"] if r[0] not in ids] + nc_new
     ef["rows"] = [r for r in ef["rows"] if r[2] < ef_desde] + ef_new
+    if coms:
+        nco = 0
+        for r in nc["rows"] + ef["rows"]:
+            c = coms.get(str(r[0]))
+            if c is not None and r[13] != c:
+                r[13] = c; nco += 1
+        print(f"Comentarios de devolución actualizados: {nco}")
 
     # Controles: sin duplicados y devoluciones efectivas = devoluciones de Oracle en cada mes
     assert len({r[0] for r in nc["rows"]}) == len(nc["rows"]), "Casos duplicados en notas de cambio"
